@@ -6,11 +6,11 @@
 
 # Master version number
 VER_MAJOR := 0
-VER_MINOR := 3
+VER_MINOR := 4
 VER_PATCH := 0
 
 PROJECT   := rem
-VERSION   := 0.3.0
+VERSION   := 0.4.0
 OPT_SPEED := 1
 
 LIBRE_MK  := $(shell [ -f ../re/mk/re.mk ] && \
@@ -112,11 +112,17 @@ clean:
 
 
 install: $(SHARED) $(STATIC)
-	@mkdir -p $(DESTDIR)$(LIBDIR) $(DESTDIR)$(INCDIR) $(DESTDIR)$(MKDIR)
+	@mkdir -p $(DESTDIR)$(LIBDIR) $(DESTDIR)$(INCDIR)
 	$(INSTALL) -m 0644 $(shell find include -name "*.h") \
 		$(DESTDIR)$(INCDIR)
 	$(INSTALL) -m 0755 $(SHARED) $(DESTDIR)$(LIBDIR)
 	$(INSTALL) -m 0755 $(STATIC) $(DESTDIR)$(LIBDIR)
+
+.PHONY: uninstall
+uninstall:
+	@rm -rf $(DESTDIR)$(INCDIR)
+	@rm -f $(DESTDIR)$(LIBDIR)/$(SHARED)
+	@rm -f $(DESTDIR)$(LIBDIR)/$(STATIC)
 
 -include test.d
 
