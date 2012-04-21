@@ -2,7 +2,7 @@ README
 ------
 
 librem - "Audio and video processing media library"
-Copyright (C) 2010 - 2011 Creytiv.com
+Copyright (C) 2010 - 2012 Creytiv.com
 
 Distributed under BSD license
 
@@ -15,6 +15,7 @@ Audio Modules:
 
 * au        unstable      Base audio types
 * aubuf     unstable      Audio buffer
+* aufile    unstable      Audio file reader/writer
 * aumix     unstable      Audio mixer
 * auresamp  unstable      Audio resampler
 * autone    unstable      Tone/DTMF generator

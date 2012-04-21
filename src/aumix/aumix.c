@@ -9,21 +9,27 @@
 #include <pthread.h>
 #include <string.h>
 #include <re.h>
+#include <rem_au.h>
 #include <rem_aubuf.h>
+#include <rem_aufile.h>
 #include <rem_aumix.h>
 
 
+/** Defines an Audio mixer */
 struct aumix {
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
 	struct list srcl;
 	pthread_t thread;
-	struct aubuf *aubuf;
+	struct aufile *af;
 	uint32_t ptime;
 	uint32_t frame_size;
+	uint32_t srate;
+	int ch;
 	bool run;
 };
 
+/** Defines an Audio mixer source */
 struct aumix_source {
 	struct le le;
 	int16_t *frame;
@@ -56,8 +62,7 @@ static void destructor(void *arg)
 		pthread_join(mix->thread, NULL);
 	}
 
-	list_flush(&mix->srcl);
-	mem_deref(mix->aubuf);
+	mem_deref(mix->af);
 }
 
 
@@ -71,19 +76,22 @@ static void source_destructor(void *arg)
 
 	mem_deref(src->aubuf);
 	mem_deref(src->frame);
+	mem_deref(src->mix);
 }
 
 
 static void *aumix_thread(void *arg)
 {
-	int16_t *frame, *mix_frame;
+	uint8_t *silence, *frame, *base_frame;
 	struct aumix *mix = arg;
+	int16_t *mix_frame;
 	uint64_t ts = 0;
 
+	silence   = mem_zalloc(mix->frame_size*2, NULL);
 	frame     = mem_alloc(mix->frame_size*2, NULL);
 	mix_frame = mem_alloc(mix->frame_size*2, NULL);
 
-	if (!frame || !mix_frame)
+	if (!silence || !frame || !mix_frame)
 		goto out;
 
 	pthread_mutex_lock(&mix->mutex);
@@ -110,6 +118,27 @@ static void *aumix_thread(void *arg)
 		if (ts > now)
 			continue;
 
+		if (mix->af) {
+
+			size_t n = mix->frame_size*2;
+
+			if (aufile_read(mix->af, frame, &n) || n == 0) {
+				mix->af = mem_deref(mix->af);
+				base_frame = silence;
+			}
+			else if (n < mix->frame_size*2) {
+				memset(frame + n, 0, mix->frame_size*2 - n);
+				mix->af = mem_deref(mix->af);
+				base_frame = frame;
+			}
+			else {
+				base_frame = frame;
+			}
+		}
+		else {
+			base_frame = silence;
+		}
+
 		for (le=mix->srcl.head; le; le=le->next) {
 
 			struct aumix_source *src = le->data;
@@ -118,14 +147,12 @@ static void *aumix_thread(void *arg)
 				   mix->frame_size*2);
 		}
 
-		aubuf_read(mix->aubuf, (uint8_t *)frame, mix->frame_size*2);
-
 		for (le=mix->srcl.head; le; le=le->next) {
 
 			struct aumix_source *src = le->data;
 			struct le *cle;
 
-			memcpy(mix_frame, frame, mix->frame_size*2);
+			memcpy(mix_frame, base_frame, mix->frame_size*2);
 
 			for (cle=mix->srcl.head; cle; cle=cle->next) {
 
@@ -151,16 +178,26 @@ static void *aumix_thread(void *arg)
 
  out:
 	mem_deref(mix_frame);
+	mem_deref(silence);
 	mem_deref(frame);
 
 	return NULL;
 }
 
 
+/**
+ * Allocate a new Audio mixer
+ *
+ * @param mixp  Pointer to allocated audio mixer
+ * @param srate Sample rate in [Hz]
+ * @param ch    Number of channels
+ * @param ptime Packet time in [ms]
+ *
+ * @return 0 for success, otherwise error code
+ */
 int aumix_alloc(struct aumix **mixp, uint32_t srate, int ch, uint32_t ptime)
 {
 	struct aumix *mix;
-	size_t sz;
 	int err;
 
 	if (!mixp || !srate || !ch || !ptime)
@@ -172,12 +209,8 @@ int aumix_alloc(struct aumix **mixp, uint32_t srate, int ch, uint32_t ptime)
 
 	mix->ptime      = ptime;
 	mix->frame_size = srate * ch * ptime / 1000;
-
-	sz = mix->frame_size*2;
-
-	err = aubuf_alloc(&mix->aubuf, sz * 6, sz * 12);
-	if (err)
-		goto out;
+	mix->srate      = srate;
+	mix->ch         = ch;
 
 	err = pthread_mutex_init(&mix->mutex, NULL);
 	if (err)
@@ -205,15 +238,49 @@ int aumix_alloc(struct aumix **mixp, uint32_t srate, int ch, uint32_t ptime)
 }
 
 
-int aumix_write(struct aumix *mix, const uint8_t *p, size_t sz)
+/**
+ * Load audio file for mixer announcements
+ *
+ * @param mix      Audio mixer
+ * @param filepath Filename of audio file with complete path
+ *
+ * @return 0 for success, otherwise error code
+ */
+int aumix_playfile(struct aumix *mix, const char *filepath)
 {
-	if (!mix || !p)
+	struct aufile_prm prm;
+	struct aufile *af;
+	int err;
+
+	if (!mix || !filepath)
 		return EINVAL;
 
-	return aubuf_write(mix->aubuf, p, sz);
+	err = aufile_open(&af, &prm, filepath, AUFILE_READ);
+	if (err)
+		return err;
+
+	if (prm.fmt != AUFMT_S16LE || prm.srate != mix->srate ||
+	    prm.channels != mix->ch) {
+		mem_deref(af);
+		return EINVAL;
+	}
+
+	pthread_mutex_lock(&mix->mutex);
+	mem_deref(mix->af);
+	mix->af = af;
+	pthread_mutex_unlock(&mix->mutex);
+
+	return 0;
 }
 
 
+/**
+ * Count number of audio sources in the audio mixer
+ *
+ * @param mix Audio mixer
+ *
+ * @return Number of audio sources
+ */
 uint32_t aumix_source_count(const struct aumix *mix)
 {
 	if (!mix)
@@ -223,8 +290,18 @@ uint32_t aumix_source_count(const struct aumix *mix)
 }
 
 
-int aumix_source_add(struct aumix_source **srcp, struct aumix *mix,
-		     aumix_frame_h *fh, void *arg)
+/**
+ * Allocate an audio mixer source
+ *
+ * @param srcp Pointer to allocated audio source
+ * @param mix  Audio mixer
+ * @param fh   Mixer frame handler
+ * @param arg  Handler argument
+ *
+ * @return 0 for success, otherwise error code
+ */
+int aumix_source_alloc(struct aumix_source **srcp, struct aumix *mix,
+		       aumix_frame_h *fh, void *arg)
 {
 	struct aumix_source *src;
 	size_t sz;
@@ -237,7 +314,7 @@ int aumix_source_add(struct aumix_source **srcp, struct aumix *mix,
 	if (!src)
 		return ENOMEM;
 
-	src->mix = mix;
+	src->mix = mem_ref(mix);
 	src->fh  = fh ? fh : dummy_frame_handler;
 	src->arg = arg;
 
@@ -253,11 +330,6 @@ int aumix_source_add(struct aumix_source **srcp, struct aumix *mix,
 	if (err)
 		goto out;
 
-	pthread_mutex_lock(&mix->mutex);
-	list_append(&mix->srcl, &src->le, src);
-	pthread_cond_signal(&mix->cond);
-	pthread_mutex_unlock(&mix->mutex);
-
  out:
 	if (err)
 		mem_deref(src);
@@ -268,10 +340,61 @@ int aumix_source_add(struct aumix_source **srcp, struct aumix *mix,
 }
 
 
+/**
+ * Enable/disable aumix source
+ *
+ * @param src    Audio mixer source
+ * @param enable True to enable, false to disable
+ */
+void aumix_source_enable(struct aumix_source *src, bool enable)
+{
+	struct aumix *mix;
+
+	if (!src)
+		return;
+
+	mix = src->mix;
+
+	pthread_mutex_lock(&mix->mutex);
+
+	if (enable) {
+		list_append(&mix->srcl, &src->le, src);
+		pthread_cond_signal(&mix->cond);
+	}
+	else {
+		list_unlink(&src->le);
+	}
+
+	pthread_mutex_unlock(&mix->mutex);
+}
+
+
+/**
+ * Write PCM samples for a given source to the audio mixer
+ *
+ * @param src Audio mixer source
+ * @param mb  PCM samples
+ *
+ * @return 0 for success, otherwise error code
+ */
 int aumix_source_put(struct aumix_source *src, struct mbuf *mb)
 {
 	if (!src || !mb)
 		return EINVAL;
 
 	return aubuf_append(src->aubuf, mb);
+}
+
+
+/**
+ * Flush the audio buffer of a given audio mixer source
+ *
+ * @param src Audio mixer source
+ */
+void aumix_source_flush(struct aumix_source *src)
+{
+	if (!src)
+		return;
+
+	aubuf_flush(src->aubuf);
 }

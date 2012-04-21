@@ -7,10 +7,10 @@
 # Master version number
 VER_MAJOR := 0
 VER_MINOR := 4
-VER_PATCH := 0
+VER_PATCH := 1
 
 PROJECT   := rem
-VERSION   := 0.4.0
+VERSION   := 0.4.1
 OPT_SPEED := 1
 
 LIBRE_MK  := $(shell [ -f ../re/mk/re.mk ] && \
@@ -29,7 +29,7 @@ include $(LIBRE_MK)
 # List of modules
 MODULES += fir
 MODULES += g711
-MODULES += aubuf auresamp autone
+MODULES += aubuf aufile auresamp autone
 
 ifneq ($(HAVE_LIBPTHREAD),)
 MODULES += aumix vidmix

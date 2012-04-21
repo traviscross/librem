@@ -30,6 +30,7 @@ struct vidmix_source {
 	struct le le;
 	pthread_mutex_t mutex;
 	struct vidframe frame;
+	struct vidsz psize;
 	struct vidmix *mix;
 	vidmix_frame_h *fh;
 	void *arg;
@@ -56,7 +57,6 @@ static void destructor(void *arg)
 		pthread_join(mix->thread, NULL);
 	}
 
-	list_flush(&mix->srcl);
 	mem_deref(mix->frame);
 }
 
@@ -70,6 +70,8 @@ static void source_destructor(void *arg)
 	list_unlink(&src->le);
 	mix->clear = true;
 	pthread_mutex_unlock(&mix->mutex);
+
+	mem_deref(src->mix);
 }
 
 
@@ -85,6 +87,11 @@ static void source_mix(struct vidmix_source *src, unsigned n, unsigned rows,
 
 	if (!frame.data[0])
 		return;
+
+	if (!vidsz_cmp(&src->psize, &frame.size)) {
+		src->psize = frame.size;
+		src->mix->clear = true;
+	}
 
 	mframe = src->mix->frame;
 
@@ -150,6 +157,7 @@ static void *vidmix_thread(void *arg)
 		uint64_t now;
 
 		if (!mix->srcl.head) {
+			mix->focus = false;
 			pthread_cond_wait(&mix->cond, &mix->mutex);
 			ts = 0;
 		}
@@ -200,6 +208,15 @@ static void *vidmix_thread(void *arg)
 }
 
 
+/**
+ * Allocate a new Video mixer
+ *
+ * @param mixp Pointer to allocated video mixer
+ * @param sz   Size of video mixer frame
+ * @param fps  Frame rate (frames per second)
+ *
+ * @return 0 for success, otherwise error code
+ */
 int vidmix_alloc(struct vidmix **mixp, const struct vidsz *sz, int fps)
 {
 	struct vidmix *mix;
@@ -246,6 +263,12 @@ int vidmix_alloc(struct vidmix **mixp, const struct vidsz *sz, int fps)
 }
 
 
+/**
+ * Put a video source in focus
+ *
+ * @param mix  Video mixer
+ * @param fidx Frame index
+ */
 void vidmix_focus(struct vidmix *mix, unsigned fidx)
 {
 	struct le *le;
@@ -270,8 +293,18 @@ void vidmix_focus(struct vidmix *mix, unsigned fidx)
 }
 
 
-int vidmix_source_add(struct vidmix_source **srcp, struct vidmix *mix,
-		      vidmix_frame_h *fh, void *arg)
+/**
+ * Allocate a video mixer source
+ *
+ * @param srcp Pointer to allocated video source
+ * @param mix  Video mixer
+ * @param fh   Mixer frame handler
+ * @param arg  Handler argument
+ *
+ * @return 0 for success, otherwise error code
+ */
+int vidmix_source_alloc(struct vidmix_source **srcp, struct vidmix *mix,
+			vidmix_frame_h *fh, void *arg)
 {
 	struct vidmix_source *src;
 	int err;
@@ -283,19 +316,13 @@ int vidmix_source_add(struct vidmix_source **srcp, struct vidmix *mix,
 	if (!src)
 		return ENOMEM;
 
-	src->mix = mix;
+	src->mix = mem_ref(mix);
 	src->fh  = fh;
 	src->arg = arg;
 
 	err = pthread_mutex_init(&src->mutex, NULL);
 	if (err)
 		goto out;
-
-	pthread_mutex_lock(&mix->mutex);
-	list_append(&mix->srcl, &src->le, src);
-	mix->clear = true;
-	pthread_cond_signal(&mix->cond);
-	pthread_mutex_unlock(&mix->mutex);
 
  out:
 	if (err)
@@ -307,6 +334,43 @@ int vidmix_source_add(struct vidmix_source **srcp, struct vidmix *mix,
 }
 
 
+/**
+ * Enable/disable vidmix source
+ *
+ * @param src    Video mixer source
+ * @param enable True to enable, false to disable
+ */
+void vidmix_source_enable(struct vidmix_source *src, bool enable)
+{
+	struct vidmix *mix;
+
+	if (!src)
+		return;
+
+	mix = src->mix;
+
+	pthread_mutex_lock(&mix->mutex);
+
+	mix->clear = true;
+
+	if (enable) {
+		list_append(&mix->srcl, &src->le, src);
+		pthread_cond_signal(&mix->cond);
+	}
+	else {
+		list_unlink(&src->le);
+	}
+
+	pthread_mutex_unlock(&mix->mutex);
+}
+
+
+/**
+ * Put a video frame into the video mixer
+ *
+ * @param src   Video source
+ * @param frame Video frame
+ */
 void vidmix_source_put(struct vidmix_source *src, const struct vidframe *frame)
 {
 	if (!src || !frame)
