@@ -25,7 +25,7 @@ struct aumix {
 	uint32_t ptime;
 	uint32_t frame_size;
 	uint32_t srate;
-	int ch;
+	uint8_t ch;
 	bool run;
 };
 
@@ -40,10 +40,10 @@ struct aumix_source {
 };
 
 
-static void dummy_frame_handler(const uint8_t *buf, size_t sz, void *arg)
+static void dummy_frame_handler(const int16_t *sampv, size_t sampc, void *arg)
 {
-	(void)buf;
-	(void)sz;
+	(void)sampv;
+	(void)sampc;
 	(void)arg;
 }
 
@@ -70,9 +70,11 @@ static void source_destructor(void *arg)
 {
 	struct aumix_source *src = arg;
 
-	pthread_mutex_lock(&src->mix->mutex);
-	list_unlink(&src->le);
-	pthread_mutex_unlock(&src->mix->mutex);
+	if (src->le.list) {
+		pthread_mutex_lock(&src->mix->mutex);
+		list_unlink(&src->le);
+		pthread_mutex_unlock(&src->mix->mutex);
+	}
 
 	mem_deref(src->aubuf);
 	mem_deref(src->frame);
@@ -167,8 +169,7 @@ static void *aumix_thread(void *arg)
 					mix_frame[i] += csrc->frame[i];
 			}
 
-			src->fh((uint8_t *)mix_frame, mix->frame_size*2,
-				src->arg);
+			src->fh(mix_frame, mix->frame_size, src->arg);
 		}
 
 		ts += mix->ptime;
@@ -195,7 +196,8 @@ static void *aumix_thread(void *arg)
  *
  * @return 0 for success, otherwise error code
  */
-int aumix_alloc(struct aumix **mixp, uint32_t srate, int ch, uint32_t ptime)
+int aumix_alloc(struct aumix **mixp, uint32_t srate,
+		uint8_t ch, uint32_t ptime)
 {
 	struct aumix *mix;
 	int err;
@@ -353,6 +355,12 @@ void aumix_source_enable(struct aumix_source *src, bool enable)
 	if (!src)
 		return;
 
+	if (src->le.list && enable)
+		return;
+
+	if (!src->le.list && !enable)
+		return;
+
 	mix = src->mix;
 
 	pthread_mutex_lock(&mix->mutex);
@@ -372,17 +380,19 @@ void aumix_source_enable(struct aumix_source *src, bool enable)
 /**
  * Write PCM samples for a given source to the audio mixer
  *
- * @param src Audio mixer source
- * @param mb  PCM samples
+ * @param src   Audio mixer source
+ * @param sampv PCM samples
+ * @param sampc Number of samples
  *
  * @return 0 for success, otherwise error code
  */
-int aumix_source_put(struct aumix_source *src, struct mbuf *mb)
+int aumix_source_put(struct aumix_source *src, const int16_t *sampv,
+		     size_t sampc)
 {
-	if (!src || !mb)
+	if (!src || !sampv)
 		return EINVAL;
 
-	return aubuf_append(src->aubuf, mb);
+	return aubuf_write(src->aubuf, (const uint8_t *)sampv, sampc * 2);
 }
 
 
